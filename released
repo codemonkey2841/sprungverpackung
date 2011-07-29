@@ -1,0 +1,403 @@
+#!/usr/bin/perl -t
+
+##########
+#
+# Filename:        released
+# Project:         Sprungverpackung
+# Number of Files: 12
+# Language:        Perl
+# Platform:        N/A
+# Summary:         A daemon that receives requests over a socket to release
+#                  jobs from a queue to a printer
+#
+##########
+
+# Extract the directory where the script lives
+$0 =~ /^(.*)released$/;
+my $dir = $1;
+
+use warnings;
+use strict;
+use Digest::MD5;
+use Sys::Syslog;
+use lib $dir;
+require cups;
+
+my $debug = 3;
+my %md5;
+my %status;
+my $authenticated = 0;
+my $auth_user     = 0;
+my $queue = "dummy";
+
+# Set perl filehandling to "hot"
+$| = 1;
+
+##########
+#
+# reply - Display a reply and log it to the system
+#
+# params
+#  reply - A string containing the reply to send to stdout
+#  function - The string to pass to the system log
+#
+##########
+sub reply {
+
+   my $reply    = shift;
+   my $function = shift;
+
+   ($debug > 2) && syslog('info', "$function");
+   print "$reply\n";
+
+} # end of reply function
+
+##########
+#
+# verify_user - verify that the given user is a valid user on the system
+#
+# params
+#  user - the user name to verify
+#
+# returns
+#  1 if user is valid, else null
+#
+##########
+sub verify_user {
+
+   my $user = shift;
+
+   if( getpwnam($user) ) {
+      my $login = getpwuid( getpwnam($user) );
+      if( "$login" eq "$user" ) {
+         ($debug > 1) && syslog('info', "$user is a good user");
+         return 1;
+      }
+   }
+   $debug && syslog('info', "$user is not a good user");
+   return;
+
+} # end of verify_user method
+
+##########
+#
+# authenticate_user - authenticate the given user against the system with the
+#  given password
+#
+# params
+#  username - the user name to log in with
+#  password - the password for the given user
+#
+# returns
+#  1 if user is authenticated, else null
+#
+##########
+sub authenticate_user {
+
+   my $username = shift;
+   my $password = shift;
+
+   if( verify_user($username) ) {
+      my $error = system("(echo \"$password\"|kinit $username)>/dev/nul 2>&1"); 
+      if( $error != 0 ) {
+         return;
+      }
+      return 1;
+   }
+   return;
+
+} # end of authenticate_user method
+
+##########
+#
+# user_is_admin - compares a name against a list of administrators
+#
+# params
+#  username - the user name to compare
+#
+# returns
+#  1 if user is in the admin list, else null
+#
+##########
+sub user_is_admin {
+
+   my $username = shift;
+   my @admin = ("jfernand",
+                "aahannah",
+                "rob",
+                "hdking",
+                "kahicks",
+                "tmryan",
+                "jpbialas",
+                "jjia");
+
+   if( verify_user($username) ) {
+      foreach( @admin ) {
+         if( "$username" eq "$_" ) {
+            return 1;
+         }
+      }
+   }
+   return;
+
+} # end of user_is_admin method
+
+##########
+#
+# urlencode - Encode a string, replacing url entities
+#
+# params
+#  string - the string to encode
+#
+# returns
+#  the encoded string
+#
+##########
+sub urlencode {
+   
+   my $string = shift;
+
+   if( $string ) {
+      $string =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
+   }
+   return $string;
+
+} # end of urlencode method
+
+##########
+#
+# urldecode - Decode a url to a regular string
+#
+# params
+#  string - the url entity to decode
+#
+# returns
+#  the decoded string
+#
+##########
+sub urldecode {
+
+   my $string = shift;
+
+   if( $string ) {
+      $string =~ s/%([A-Fa-f0-9]{2})/pack('C', hex($1))/seg;
+   }
+   return $string;
+
+} # end of urldecode method
+
+##########
+#
+# sanitize_variable - sanitizes a tainted variable using the given regex
+#
+# params
+#  variable - the tainted variable to be sanitized
+#  regex    - the regular expression to be used to sanitize the variable
+#
+# returns
+#  the sanitized variable
+#
+##########
+sub sanitize_variable {
+
+   my $variable = shift;
+   my $regex    = shift;
+
+   if( $variable ) {
+      $variable =~ $regex;
+      if( "$variable" ne "$1" ) {
+            $debug && syslog('info',"$variable is sanitized");
+      }
+      return $1;
+   }
+   return;
+
+} # end of sanitize_variable method
+
+##########
+#
+# do_auth - commence user authentication
+#
+# params
+#  user     - the user name to authenticate
+#  password - the password for the user
+#
+# returns
+#  1 if user is successfuly authenticated, else 0
+#
+##########
+sub do_auth {
+
+   my $user          = shift;
+   my $password      = shift;
+
+   if( $authenticated ) {
+      # user is already authenticated
+      if( $user ) {
+         $user = sanitize_variable($user,"([a-zA-Z0-9]+)");
+         reply("BAD Already authenticated",
+               "do_auth($user)->'BAD Already authenticated'");
+      } else {
+         reply("BAD Already authenticated",
+               "do_auth()->'BAD Already authenticated'");
+      }
+      return; 
+   }
+
+   if( $user && $password ) {
+      # user not authenticated, but user and password are present
+      $user     = sanitize_variable($user,     "([a-zA-Z0-9]+)" );
+      $password = sanitize_variable($password, "(.*)"           );
+
+      if( authenticate_user($user,$password) ) {
+         # user has been successfully authenticated
+         $authenticated = 1;
+         $auth_user     = $user;
+         ($debug > 1) && syslog('info',
+                              "do_auth($user): authentication successful");
+         if( user_is_admin($auth_user) ) {
+            # user is an admin
+            reply("ADMOK","do_auth($user)->'ADMOK'");
+         } else {
+            # user is not an admin
+            reply("OK","do_auth($user)->'OK'");
+         }
+         return 1;
+      } else {
+         $debug && syslog('info',"do_auth($user):  bad password");
+         reply("BAD","do_auth($user)->'BAD'");
+         return;
+      }
+   } else {
+         syslog('info',"do_auth(): Null username");
+         reply("BAD","do_auth(null)->'BAD'");
+         return;
+   }
+
+} # end of do_auth method
+
+##########
+#
+# do_get - prints a list of jobs from the queue to the socket
+#
+##########
+sub do_get {
+
+   my $job;
+   my $title;
+   my $owner;
+
+   if( $authenticated ) {
+      my $user_admin = user_is_admin($auth_user);
+      my %jobs  = list_jobs($queue);
+      foreach $job (keys %jobs) {
+         $title = urlencode($jobs{$job}->{name});
+         $owner = $jobs{$job}->{owner};
+         if( $user_admin ) {
+            reply("LIST $job $owner $title",
+                  "do_get($auth_user)->'LIST $job $owner $title'");
+         } elsif( "$jobs{$job}->{owner}" eq "$auth_user" ) {
+            reply("LIST $job $owner $title",
+                  "do_get($auth_user)->'LIST $job $owner $title'");
+         }
+      }
+      reply("OK ", "do_get($auth_user)->'OK'");
+      return;
+   } else {
+      reply("BAD Not authenticated",
+            "do_get(null)->'BAD Not authenticated'");
+      return;
+   }
+} # end of do_get method
+
+##########
+#
+# do_transfer - transfer the specified job to the specified printer
+#
+# params
+#  job  - the ID of the job to transfer
+#  dest - the printer to transfer the job to
+#
+##########
+sub do_transfer {
+
+  my $job  = shift;
+  my $dest = shift;
+
+  $job = sanitize_variable($job, '([\d]+)');
+  $dest = sanitize_variable($dest, '([\w\d]+)');
+
+  # ensure user is authenticated
+  if( !$authenticated ) {
+    reply("BAD Not authenticated",
+          "do_transfer(null)->'BAD Not authenticated'");
+    return;
+  }
+
+  my %jobs = list_jobs($queue);
+  # verify job exists
+  if( !(exists $jobs{$job}) ) {
+    reply("BAD Job doesn't exist",
+          "do_transfer($job)->'BAD Job doesn't exist'");
+    return;
+  }
+
+  # verify user is authorized to print the specified job
+  if( !user_is_admin($auth_user) && !($auth_user eq $jobs{$job}->{'owner'}) ) {
+    reply("BAD Not authorized to print the job",
+          "do_transfer($auth_user, $job)->'BAD Not authorized to print"
+          . " the job'");
+    return;
+  }
+
+  # print the job
+  move_job($job, $dest);
+
+  # pass response
+  reply("OK",
+        "do_transfer($job, $dest)->'OK'");
+
+} # end of do_transfer method
+
+##########
+#
+# do_endsession - Passes the end session string through a socket
+#
+##########
+sub do_endsession {
+
+   reply("OK Goodbye","do_endsession(null)->'OK'");
+   closelog();
+   exit(0);
+
+} # end of do_endsession method
+
+$ENV{"PATH"}="/usr/kerberos/bin:/bin";
+
+openlog("released");
+reply("Hello. Released 1.00","main()->Hello");;
+while( my $line = <> ){
+   chomp $line;
+   (my @parameters) = split(" ", $line);
+   my $command = shift @parameters;
+   if( $command ) {
+      if( "$command" eq "AUTH" ) {
+         $debug && syslog('info', "Auth ");
+         do_auth(@parameters);
+      } elsif( "$command" eq "GET" ) {
+         $debug && syslog('info', "Get ");
+         do_get();
+      } elsif( "$command" eq "TRANSFER" ) {
+         $debug && syslog('info', "Transfer ");
+         do_transfer(@parameters);
+      } elsif( "$command" eq "ENDSESSION" ) {
+         $debug && syslog('info', "Endsession"); 
+         do_endsession($auth_user);
+      } else {
+         reply("BAD Bad command","main()->'BAD Bad command'");
+      }
+   } else {
+      reply("BAD Null command","main()->'BAD Null command'");
+   }
+} 
+# unexpected end

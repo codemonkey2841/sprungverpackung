@@ -1,0 +1,82 @@
+#!/usr/bin/perl -t
+
+###########
+#
+# Filename:        release
+# Project:         Sprungverpackung
+# Number of Files: 12
+# Language:        Perl
+# Platform:        N/A
+# Summary:         Releases a specified job for a specified user to a
+#                  specified printer
+#
+###########
+
+# Extract the directory where the script lives
+$0 =~ /^(.*)release$/;
+my $dir = $1;
+
+use lib $dir;
+use Config::Simple;
+use Release;
+use Switch;
+use WECNnet;
+
+# Gather variables from config file
+Config::Simple->import_from($dir . 'sprung.ini', \%config);
+my $host = $config{'default.host'};
+my $local_port = $config{'default.local'};
+my $remote_port = $config{'default.remote'};
+my $user = $config{'default.user'};
+my $idfile = $config{'default.idfile'};
+
+###########
+#
+# doAuth - gathers user information and authorizes user
+#
+# params
+#  none
+#
+# returns
+#  true if user is authenticated, else false
+#
+###########
+sub doAuth {
+
+  print "What is your username? ";
+  chomp(my $user = <STDIN>);
+  $user = scrubString($user, '[\w\d]');
+  print "What is your password? ";
+  chomp(my $passwd = <STDIN>);
+  $passwd = scrubString($passwd, '[\w\d\!\@\#\$\%\^\&\*\(\)]');
+  return connectLink($user, $passwd);
+
+} # end of doAuth method
+
+my $pid = setup_encrypted_tunnel($user, 
+                                 $host, 
+                                 $local_port, 
+                                 $remote_port, 
+                                 $ifile);
+my $socket = setup_connection($host, $remote_port);
+setSocket($socket);
+
+if (!$socket) {
+  print "Error establishing link\n";
+  goto END;
+}
+
+my $line = getLine($socket);
+if ($line !~ /^Hello\. Released/) {
+  print "Invalid server response\n";
+  goto END;
+} else {
+  print "$line\n";
+}
+
+while (!doAuth()) {}
+print "At any time type \'help\' for a list of commands\n";
+while (doCmd()) {}
+
+END:
+`kill $pid`;

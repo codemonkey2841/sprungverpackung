@@ -1,0 +1,34 @@
+#!/usr/bin/perl
+
+##########
+#
+# Filename:        purge
+# Project:         Sprungverpackung
+# Number of Files: 12
+# Language:        Perl
+# Platform:        N/A
+# Summary:         Purges jobs from the "dummy" queue that are older than 1
+#                  day
+#
+##########
+
+# Extract the directory where the script lives
+$0 =~ /^(.*)purge$/;
+my $dir = $1;
+
+use lib $dir;
+require cups;
+
+# Retrieve jobs from dummy queue
+%jobs = list_jobs("dummy");
+
+foreach $job (keys %jobs) {
+   # Get the difference between the timestamp of the job and the current time
+   $diff = time() - $jobs{$job}->{timestamp};
+   if ($diff > 86400) {
+      # Job is older than one day
+      print "Purging $job...";
+      print delete_job($job);
+      print "\n";
+   }
+}
